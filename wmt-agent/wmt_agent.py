@@ -48,7 +48,8 @@ class ValidationTool(BaseTool):
             "errors": [],
             "duplicates_found": False,
             "conflicts_found": False,
-            "conflicts": {}
+            "conflicts": {},
+            "duplicates": {}
         }
 
         # Check validity of matches
@@ -59,12 +60,15 @@ class ValidationTool(BaseTool):
 
         # Check for exact duplicates
         seen_pairs = set()
+        duplicates = {}
         for unit, reading in matches:
             pair = (unit, reading)
             if pair in seen_pairs:
+                duplicates[unit] = reading
                 validation_result["duplicates_found"] = True
                 validation_result["errors"].append(f"Duplicate reading found: Unit {unit} with reading {reading}")
             seen_pairs.add(pair)
+        validation_result["duplicates"] = duplicates
 
         # Check for conflicting values
         unit_readings = defaultdict(list)
@@ -128,8 +132,6 @@ class RemoveConflicts(BaseTool):
 
         filtered = [(unit, reading) for unit, reading in matches if unit in valid_units]
         
-        print(f"Conflicts removed: {filtered}")
-
         return filtered
 
 class CreateJSON(BaseTool):
@@ -145,7 +147,7 @@ class CreateJSON(BaseTool):
         for unit, reading in matches:
             unit_data = {
                 "unit": unit,
-                "reading": int(float(reading))
+                "reading": float(reading)
             }
             result.append(unit_data)
 
@@ -174,6 +176,7 @@ class UnitReadingReasoner: # Custom Reasoner class for unit reading processing
         print(f"{type}: {description}")
 
     def _think_initial(self, user_input: str) -> str:
+            
             """Initial reasoning about the input."""
             if self._contains_unit_readings(user_input):
                 return "I can see unit readings in the input. I need to extract them first."
@@ -181,7 +184,7 @@ class UnitReadingReasoner: # Custom Reasoner class for unit reading processing
                 return "I don't see any unit readings in this input. I should inform the user."
     
     def reason(self, user_input: str) -> Tuple[str, List[Dict[str, Any]]]:
-
+        self.log.clear()
         """Main reasoning method that decides processing steps for unit readings."""
         # Check if input contains unit reading patterns
         print(f"{80 * '='}\n ReAct Simulation\n{80 * '='}")
@@ -206,16 +209,19 @@ class UnitReadingReasoner: # Custom Reasoner class for unit reading processing
     def _contains_unit_readings(self, text: str) -> bool: 
         """Check if text contains unit reading patterns and standardize input."""
         # Log the action of checking for inputs
-        self.log_tao("🔧 Action", "Checking for unit readings in input")
+        self.log_tao("🔧 Action", "Checking for unit readings in input with Gemini")
 
         # Try to extract and standardize using Gemini AI
         try:
             prompt = (
-                "Please extract all unit readings from the following text and "
-                "clean it by returning them in the standard format: 'Unit 1A reads 24 m3, Unit 2B reads 3 m3, Unit 2A reads 24 m3'\n"
-                "Return it as the final text only, no other text or code"
-                
-                f"Text: ```{text}```"
+                """
+                You are a helpful assistant that extracts unit readings from text.  
+                Please extract all unit readings from the following text and clean it by returning them in the standard format: 'Unit 1A reads 24 m3, Unit 2B reads 3 m3, Unit 2A reads 24 m3'" 
+                Check for cubic meter unit reading synonyms, convert units to cubic meter and make readings two decimal places.
+                Return it as the final text only, no other text or code
+                """ 
+
+                f"Text: {text}"
             )
 
             genai.configure(api_key=gemini_api_key)
@@ -228,12 +234,17 @@ class UnitReadingReasoner: # Custom Reasoner class for unit reading processing
                     "temperature": 0.0
                 }
             )
-
-            result = response.text
             
-            self.log_tao("👁️ Observation", f"Gemini response: Code for ready for extraction")
-            self.standardized_input = result
-            return True
+            result = response.text
+
+            if 'Unit' in result or 'm3' in result:
+                self.log_tao("👁️ Observation", f"Gemini response: Code for ready for extraction. {result}")
+                self.standardized_input = result
+                return True
+            else:
+                self.log_tao("👁️ Observation", f"Gemini response: Ambigious input found. {result}")
+                self.standardized_input = result
+                return False
             
         except Exception as e:
             self.log_tao("👁️ Observation", f"Gemini API error: {str(e)}")
@@ -275,26 +286,35 @@ class UnitReadingReasoner: # Custom Reasoner class for unit reading processing
         elif current_step == 2:  # After validation
             self.validation_result = validation_result
             if validation_result:
+                errors = validation_result.get('errors', [])
+                self.log_tao("👁️ Observation", f"Validation Result, {errors}")
+                # for error in errors:
+                #     if "Duplicate" in error:
+                #         self.log_tao("👁️ Observation", f"Duplicates found, {error}")
+                #     else:
+                #         self.log_tao("👁️ Observation", f"Conflicts found, {error}")   
+
                 if validation_result.get('duplicates_found', False):
-                    errors = validation_result.get('errors', [])
-                    for error in errors:
-                        self.log_tao("👁️ Observation", f"Duplicates found, {error}")
-                        self.log_tao("💭 Thought", "I'll remove extraction matches duplicates")
-                        
+                    duplicates = validation_result.get('duplicates', {})
+                    self.log_tao("👁️ Observation", f"Duplicates found, {duplicates}")
+                    self.log_tao("💭 Thought", "I'll remove extraction matches duplicates")
                     self.step = 3
 
                     return {
                     'tool': 'remove_duplicates',
                     'args': {'matches': None},  # Will be filled with extraction results
                     'step': 3,
-                    'duplicates_found': errors
+                    'duplicates_found': duplicates
                     } 
 
                 elif validation_result.get('conflicts_found', False):
                     conflicts = validation_result.get('conflicts', {})
-                    for unit, readings in conflicts.items():
-                        self.log_tao("👁️ Observation", f"Conflicting values found, Unit {unit}: {', '.join(readings)}")
-                        self.log_tao("💭 Thought", "I'll remove extraction matches with conflicts")
+                    self.log_tao("👁️ Observation", f"Conflicts found, {conflicts}")
+                    self.log_tao("💭 Thought", "I'll remove extraction matches with conflicts")
+
+                    # for unit, readings in conflicts.items():
+                    #     self.log_tao("👁️ Observation", f"Conflicting values found, Unit {unit}: {', '.join(readings)}")
+                    #     self.log_tao("💭 Thought", "I'll remove extraction matches with conflicts")
                         
                     return {
                         'tool': 'remove_conflicts',
@@ -317,10 +337,9 @@ class UnitReadingReasoner: # Custom Reasoner class for unit reading processing
             else:
                 if self.validation_result.get('conflicts_found', False):
                     conflicts = validation_result.get('conflicts', {})
-                    for unit, readings in conflicts.items():
-                        self.log_tao("👁️ Observation", f"Conflicting values found, Unit {unit}: {', '.join(readings)}")
-                        self.log_tao("💭 Thought", "I'll remove extraction matches with conflicts")
-                        
+                    self.log_tao("👁️ Observation", f"Conflicts found, {conflicts}")
+                    self.log_tao("💭 Thought", "I'll remove extraction matches with conflicts")
+
                     return {
                         'tool': 'remove_conflicts',
                         'args': {'matches': None},  # Will be filled with extraction results
@@ -331,9 +350,8 @@ class UnitReadingReasoner: # Custom Reasoner class for unit reading processing
         elif current_step == 3: # After removing duplicates
             if self.validation_result and self.validation_result.get('conflicts_found', False):
                 conflicts = self.validation_result.get('conflicts', {})
-                for unit, readings in conflicts.items():
-                    self.log_tao("👁️ Observation", f"Conflicting values found, Unit {unit}: {', '.join(readings)}")
-                    self.log_tao("💭 Thought", "I'll remove extraction matches with conflicts")
+                self.log_tao("👁️ Observation", f"Conflicts found, {conflicts}")
+                self.log_tao("💭 Thought", "I'll remove extraction matches with conflicts")
 
                 return {
                     'tool': 'remove_conflicts',
@@ -361,7 +379,7 @@ class UnitReadingReasoner: # Custom Reasoner class for unit reading processing
             if self.log[-1].startswith("👁️ Observation: Final JSON is ready to export"):
                 return None  # No further steps needed
             else:
-                self.log_tao("👁️ Observation", "Duplicates Removed")
+                self.log_tao("👁️ Observation", "All input errors were removed")
                 self.log_tao("💭 Thought", "I'll process the validated matches into JSON file")
                 self.step = 5
 
@@ -470,7 +488,7 @@ class WorkflowState(TypedDict): # Workflow State
     processing_results: List[Dict[str, Any]]
     pending_tool_calls: List[Dict[str, Any]]
     all_results: List[Dict[str, Any]]
-    logs: List[str]
+    logs: List[List[str]] # Changed to List[List[str]] to store copies of logs
 
 
 # Initialize tools and reasoner
@@ -569,7 +587,6 @@ def agent_node(state: WorkflowState):
 
                 next_step = reasoner.get_next_step(current_step)
                 if next_step:
-                    print(f'NEXT STEP: {next_step}')
                     if 'conflicts_found' in next_step:
                         conflicts = next_step['conflicts_found']
                         state["conflicts_found"].append(conflicts)
@@ -594,7 +611,7 @@ def agent_node(state: WorkflowState):
                     }
 
         # Processing complete, synthesize final response
-        logs = reasoner.log
+        logs = reasoner.log.copy()
         state["logs"].append(logs)
 
         user_input = next(msg.content for msg in messages if isinstance(msg, HumanMessage))
@@ -722,7 +739,7 @@ def run_workflow(user_input: str):
     # # print("=" * 80)
 
 
-# result = run_workflow("Unit 12A reads 2 m3. Unit 12A is 2 m3, Unit 2B is 22 m3, 15C reads 7 m3, 5D reads 11 m3,5D reads 11 m3")
+# result = run_workflow("Unit 12A reads 2 m3, Unit 3B reads 2 m3, Unit 12A reads 2 m3, 3B is 3 m3")
 
 # print(f'RESULT: {result["logs"]}')
 

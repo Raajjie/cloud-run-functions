@@ -1,0 +1,7 @@
+Flask>=2.2.0
+python-dotenv
+langchain-core
+langgraph
+google-generativeai
+pydantic
+gunicorn
